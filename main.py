@@ -4,209 +4,180 @@ from PIL import Image, ImageTk, ImageDraw
 import numpy as np
 
 
-class ImageProcessorApp(tk.Tk):
+class Layer:
+    def __init__(self, image, filepath):
+        self.original_image = image
+        self.filepath = filepath
+        self.name = filepath.split('/')[-1]
+        self.mode = tk.StringVar(value="Нормальный")
+        self.opacity = tk.DoubleVar(value=100.0)
+        self.ui_frame = None
+
+
+class ImageEditor(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Обработка изображений")
-        # Увеличим размер окна, чтобы поместился предпросмотр
-        self.geometry("700x750")
+        self.title("SCOI_1")
+        self.geometry("900x700")
 
-        self.img1_pil = None
-        self.img2_pil = None
+        self.layers = []  # Список слоев
+        self.base_size = None  # Размер первого изображения
         self.result_image = None
-
-        # Ссылки на фото для tkinter, чтобы их не удалил сборщик мусора
-        self.tk_photo1 = None
-        self.tk_photo2 = None
         self.tk_photo_res = None
 
         self.create_widgets()
 
     def create_widgets(self):
-        # --- Холст для отображения картинок ---
-        self.canvas = tk.Canvas(self, width=500, height=400, bg='lightgray', bd=2, relief="sunken")
-        self.canvas.pack(pady=10)
-        self.canvas.create_text(250, 200, text="Здесь будет предпросмотр", fill="gray")
+        # Предпросмотр
+        left_frame = tk.Frame(self)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # --- Кнопки загрузки ---
-        btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=10)
+        self.canvas = tk.Canvas(left_frame, bg='lightgray', bd=2, relief="sunken")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.create_text(250, 300, text="Загрузите первое изображение", fill="gray", tags="placeholder")
 
-        tk.Button(btn_frame, text="Загрузить Изображение 1", command=lambda: self.load_image(1)).grid(row=0,
-                                                                                                            column=0,
-                                                                                                            padx=5)
-        self.lbl_img1 = tk.Label(btn_frame, text="Файл 1 не выбран")
-        self.lbl_img1.grid(row=0, column=1, padx=5)
+        tk.Button(left_frame, text="Сохранить результат", command=self.save_image, bg="lightgreen").pack(pady=10)
 
-        tk.Button(btn_frame, text="Загрузить Изображение 2", command=lambda: self.load_image(2)).grid(row=1,
-                                                                                                               column=0,
-                                                                                                               padx=5,
-                                                                                                               pady=5)
-        self.lbl_img2 = tk.Label(btn_frame, text="Файл 2 не выбран")
-        self.lbl_img2.grid(row=1, column=1, padx=5)
+        # Панель слоев
+        right_frame = tk.Frame(self, width=320, bd=2, relief="groove")
+        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=10, pady=10)
+        right_frame.pack_propagate(False)
 
-        # --- Настройки операций ---
-        settings_frame = tk.Frame(self)
-        settings_frame.pack(pady=10)
+        tk.Label(right_frame, text="Управление", font=("Arial", 12, "bold")).pack(pady=5)
 
-        tk.Label(settings_frame, text="Операция:").grid(row=0, column=0)
-        self.operation_var = tk.StringVar(value="Сумма")
-        operations = ["Сумма", "Произведение", "Среднее", "Минимум", "Максимум", "Маска - Круг", "Маска - Квадрат",
-                      "Маска - Прямоугольник"]
-        ttk.Combobox(settings_frame, textvariable=self.operation_var, values=operations, state="readonly").grid(row=0,
-                                                                                                                column=1,
-                                                                                                                padx=5)
-
-        tk.Label(settings_frame, text="Каналы:").grid(row=0, column=2)
+        # Выбор каналов (глобально)
+        channel_frame = tk.Frame(right_frame)
+        channel_frame.pack(pady=5, fill=tk.X)
+        tk.Label(channel_frame, text="Каналы:").pack(side=tk.LEFT, padx=5)
         self.channel_var = tk.StringVar(value="RGB")
-        channels = ["RGB", "R", "G", "B", "RG", "GB", "RB"]
-        ttk.Combobox(settings_frame, textvariable=self.channel_var, values=channels, state="readonly", width=5).grid(
-            row=0, column=3, padx=5)
+        cb_channels = ttk.Combobox(channel_frame, textvariable=self.channel_var,
+                                   values=["RGB", "R", "G", "B", "RG", "GB", "RB"], state="readonly", width=8)
+        cb_channels.pack(side=tk.LEFT)
+        cb_channels.bind("<<ComboboxSelected>>", lambda e: self.render_pipeline())
 
-        # --- Кнопки выполнения и сохранения ---
-        tk.Button(self, text="Выполнить операцию", command=self.process_images, bg="lightblue",
-                  font=("Arial", 10, "bold")).pack(pady=10)
-        tk.Button(self, text="Сохранить результат", command=self.save_image, bg="lightgreen").pack(pady=5)
+        self.layers_canvas = tk.Canvas(right_frame)
+        scrollbar = tk.Scrollbar(right_frame, orient="vertical", command=self.layers_canvas.yview)
+        self.scrollable_layers_frame = tk.Frame(self.layers_canvas)
 
-    def load_image(self, img_num):
+        self.scrollable_layers_frame.bind(
+            "<Configure>",
+            lambda e: self.layers_canvas.configure(scrollregion=self.layers_canvas.bbox("all"))
+        )
+
+        self.layers_canvas.create_window((0, 0), window=self.scrollable_layers_frame, anchor="nw")
+        self.layers_canvas.configure(yscrollcommand=scrollbar.set)
+        self.layers_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        tk.Button(right_frame, text="+ Добавить слой", command=self.add_layer, bg="lightblue").pack(pady=10, fill=tk.X,
+                                                                                                    padx=5)
+
+    def add_layer(self):
         filepath = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp")])
-        if filepath:
-            try:
-                img = Image.open(filepath).convert('RGB')
-                if img_num == 1:
-                    self.img1_pil = img
-                    self.lbl_img1.config(text=filepath.split('/')[-1])
-                else:
-                    self.img2_pil = img
-                    self.lbl_img2.config(text=filepath.split('/')[-1])
+        if not filepath: return
+        try:
+            img = Image.open(filepath).convert('RGB')
+            new_layer = Layer(img, filepath)
+            if not self.layers: self.base_size = img.size
+            self.layers.append(new_layer)
+            self.build_layer_ui(new_layer)
+            self.render_pipeline()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Ошибка: {e}")
 
-                self.update_preview()
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось загрузить изображение:\n{e}")
+    def build_layer_ui(self, layer):
+        frame = tk.Frame(self.scrollable_layers_frame, bd=1, relief="solid", pady=5, padx=5)
+        frame.pack(fill=tk.X, pady=2, padx=2)
 
-    def update_preview(self):
-        """Отрисовывает изображения на холсте (второе поверх первого)"""
-        self.canvas.delete("all")
+        tk.Label(frame, text=layer.name, font=("Arial", 8, "bold")).pack(anchor="w")
 
-        canvas_w, canvas_h = 500, 400
+        c_frame = tk.Frame(frame)
+        c_frame.pack(fill=tk.X)
 
-        # Функция для создания превью с сохранением пропорций
-        def get_preview(img_pil):
-            img_copy = img_pil.copy()
-            img_copy.thumbnail((canvas_w, canvas_h))
-            return ImageTk.PhotoImage(img_copy)
+        modes = ["Нормальный", "Сумма", "Разность", "Умножение", "Среднее", "Минимум", "Максимум",
+                 "Маска - Круг", "Маска - Квадрат", "Маска - Прямоугольник"]
+        cb = ttk.Combobox(c_frame, textvariable=layer.mode, values=modes, state="readonly", width=15)
+        cb.pack(side=tk.LEFT)
+        cb.bind("<<ComboboxSelected>>", lambda e: self.render_pipeline())
 
-        # Отрисовка первого изображения (снизу)
-        if self.img1_pil:
-            self.tk_photo1 = get_preview(self.img1_pil)
-            # Размещаем по центру холста
-            self.canvas.create_image(canvas_w // 2, canvas_h // 2, image=self.tk_photo1, anchor="center")
+        scale = tk.Scale(c_frame, variable=layer.opacity, from_=0, to=100, orient=tk.HORIZONTAL, showvalue=False,
+                         command=lambda v: self.render_pipeline())
+        scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Отрисовка второго изображения (сверху)
-        if self.img2_pil:
-            self.tk_photo2 = get_preview(self.img2_pil)
-            self.canvas.create_image(canvas_w // 2, canvas_h // 2, image=self.tk_photo2, anchor="center")
+    def render_pipeline(self):
+        if not self.layers: return
+        w, h = self.base_size
+        comp_arr = np.zeros((h, w, 3), dtype=np.float16)
 
-    def process_images(self):
-        if not self.img1_pil:
-            messagebox.showerror("Ошибка", "Загрузите хотя бы первое изображение!")
-            return
+        # Парсинг каналов
+        ch_s = self.channel_var.get()
+        acts = [i for i, c in enumerate('RGB') if c in ch_s]
 
-        op = self.operation_var.get()
-        needs_second_img = not op.startswith("Маска")
+        for layer in self.layers:
+            # Масштабирование слоя
+            img_res = layer.original_image.resize((w, h), Image.Resampling.LANCZOS)
+            lay_arr = np.array(img_res, dtype=np.float16)
 
-        if needs_second_img and not self.img2_pil:
-            messagebox.showerror("Ошибка", "Для этой операции нужно два изображения!")
-            return
+            mode = layer.mode.get()
+            alpha = layer.opacity.get() / 100.0
 
-        # Работаем с копиями оригиналов
-        img1 = self.img1_pil.copy()
+            # Логика маски
+            if "Маска" in mode:
+                mask_im = Image.new('L', (w, h), 0)
+                draw = ImageDraw.Draw(mask_im)
+                cx, cy = w // 2, h // 2
+                s = min(w, h) // 3
+                if "Круг" in mode:
+                    draw.ellipse([cx - s, cy - s, cx + s, cy + s], fill=255)
+                elif "Квадрат" in mode:
+                    draw.rectangle([cx - s, cy - s, cx + s, cy + s], fill=255)
+                elif "Прямоугольник" in mode:
+                    draw.rectangle([cx - s * 1.5, cy - s, cx + s * 1.5, cy + s], fill=255)
 
-        if needs_second_img:
-            img2 = self.img2_pil.copy()
-            # Меньшее изображение растягивается до размеров большего [cite: 17, 18]
-            area1 = img1.width * img1.height
-            area2 = img2.width * img2.height
+                m_arr = np.array(mask_im, dtype=np.float16) / 255.0
+                m_arr = np.stack([m_arr] * 3, axis=-1)
+                blended = lay_arr * m_arr  # Маскируем текущий слой
 
-            if area1 > area2:
-                img2 = img2.resize(img1.size, Image.Resampling.LANCZOS)
-                target_size = img1.size
+            # Режимы наложения
+            elif mode == "Сумма":
+                blended = comp_arr + lay_arr
+            elif mode == "Разность":
+                blended = np.abs(comp_arr - lay_arr)
+            elif mode == "Умножение":
+                blended = (comp_arr * lay_arr) / 255.0
+            elif mode == "Среднее":
+                blended = (comp_arr + lay_arr) / 2.0
+            elif mode == "Минимум":
+                blended = np.minimum(comp_arr, lay_arr)
+            elif mode == "Максимум":
+                blended = np.maximum(comp_arr, lay_arr)
             else:
-                img1 = img1.resize(img2.size, Image.Resampling.LANCZOS)
-                target_size = img2.size
-        else:
-            target_size = img1.size
-            img2 = None
+                blended = lay_arr  # Нормальный
 
-        # Переводим в массивы numpy (float16 для математики)
-        arr1 = np.array(img1, dtype=np.float16)
-        arr2 = np.array(img2, dtype=np.float16) if img2 else None
-        result_arr = np.copy(arr1)
+            # Применение прозрачности и каналов
+            for c in acts:
+                comp_arr[..., c] = comp_arr[..., c] * (1.0 - alpha) + blended[..., c] * alpha
 
-        # Выбор активных каналов (0-R, 1-G, 2-B) [cite: 15]
-        ch_str = self.channel_var.get()
-        active_channels = []
-        if 'R' in ch_str: active_channels.append(0)
-        if 'G' in ch_str: active_channels.append(1)
-        if 'B' in ch_str: active_channels.append(2)
+        self.result_image = Image.fromarray(np.clip(comp_arr, 0, 255).astype(np.uint8))
+        self.update_canvas_preview()
 
-        # Математические операции над пикселями [cite: 12]
-        if op == "Сумма":
-            result_arr[..., active_channels] = arr1[..., active_channels] + arr2[..., active_channels]
-        elif op == "Произведение":
-            result_arr[..., active_channels] = (arr1[..., active_channels] * arr2[..., active_channels]) / 255.0
-        elif op == "Среднее":
-            result_arr[..., active_channels] = (arr1[..., active_channels] + arr2[..., active_channels]) / 2.0
-        elif op == "Минимум":
-            result_arr[..., active_channels] = np.minimum(arr1[..., active_channels], arr2[..., active_channels])
-        elif op == "Максимум":
-            result_arr[..., active_channels] = np.maximum(arr1[..., active_channels], arr2[..., active_channels])
-        elif op.startswith("Маска"):
-            mask_img = Image.new('L', target_size, 0)
-            draw = ImageDraw.Draw(mask_img)
-            w, h = target_size
-            center_x, center_y = w // 2, h // 2
-            size = min(w, h) // 3
-
-            if "Круг" in op:
-                draw.ellipse([center_x - size, center_y - size, center_x + size, center_y + size], fill=255)
-            elif "Квадрат" in op:
-                draw.rectangle([center_x - size, center_y - size, center_x + size, center_y + size], fill=255)
-            elif "Прямоугольник" in op:
-                draw.rectangle([center_x - size * 1.5, center_y - size, center_x + size * 1.5, center_y + size],
-                               fill=255)
-
-            mask_arr = np.array(mask_img, dtype=np.float16) / 255.0
-            mask_arr = np.stack([mask_arr] * 3, axis=-1)
-            result_arr[..., active_channels] = arr1[..., active_channels] * mask_arr[..., active_channels]
-
-        # Ограничиваем значения от 0 до 255
-        result_arr = np.clip(result_arr, 0, 255).astype(np.uint8)
-        self.result_image = Image.fromarray(result_arr)
-
-        # Вывод результата на холст предпросмотра
+    def update_canvas_preview(self):
         self.canvas.delete("all")
-        res_copy = self.result_image.copy()
-        res_copy.thumbnail((500, 400))
-        self.tk_photo_res = ImageTk.PhotoImage(res_copy)
-        self.canvas.create_image(250, 200, image=self.tk_photo_res, anchor="center")
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw < 10: cw, ch = 500, 500
 
-        messagebox.showinfo("Успех", "Операция выполнена! Результат выведен на экран.")
+        tmp = self.result_image.copy()
+        tmp.thumbnail((cw, ch))
+        self.tk_photo_res = ImageTk.PhotoImage(tmp)
+        self.canvas.create_image(cw // 2, ch // 2, image=self.tk_photo_res)
 
     def save_image(self):
-        if not self.result_image:
-            messagebox.showwarning("Внимание", "Сначала выполните операцию!")
-            return
-
-        filepath = filedialog.asksaveasfilename(
-            defaultextension=".jpg",
-            filetypes=[("JPEG", "*.jpg"), ("PNG", "*.png")]
-        )
-        if filepath:
-            self.result_image.save(filepath)
-            messagebox.showinfo("Сохранено", f"Изображение успешно сохранено в {filepath}")
+        if not self.result_image: return
+        path = filedialog.asksaveasfilename(defaultextension=".jpg",
+                                            filetypes=[("JPEG", "*.jpg"), ("PNG", "*.png")])
+        if path: self.result_image.save(path)
 
 
 if __name__ == "__main__":
-    app = ImageProcessorApp()
+    app = ImageEditor()
     app.mainloop()
